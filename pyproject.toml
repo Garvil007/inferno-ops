@@ -1,0 +1,33 @@
+[project]
+name = "inferno-ops"
+version = "0.1.0"
+description = "Autonomous AI ops agent for an immersion-cooled AI data center."
+requires-python = ">=3.11"
+dependencies = [
+    "streamlit>=1.38",
+    "anthropic>=0.40",
+    "mcp>=1.0",
+    "python-dotenv>=1.0",
+    "pydantic>=2.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "black>=24.10",
+    "ruff>=0.7",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
