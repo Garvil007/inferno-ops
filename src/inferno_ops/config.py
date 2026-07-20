@@ -24,6 +24,7 @@ class InfernoConfig:
         temp_warning_c: GPU temperature (Celsius) that triggers a warning.
         temp_throttle_c: GPU temperature (Celsius) at which thermal throttling begins.
         temp_critical_c: GPU temperature (Celsius) considered critical.
+        throttle_clock_drop_pct: Fraction (0-1) to cut clock speed by when throttled.
         sim_seed: Seed for the telemetry simulator's RNG, for reproducible demos.
         gpu_count: Number of simulated GPUs.
     """
@@ -34,6 +35,7 @@ class InfernoConfig:
     temp_warning_c: float = 75.0
     temp_throttle_c: float = 85.0
     temp_critical_c: float = 95.0
+    throttle_clock_drop_pct: float = 0.25
     sim_seed: int = 42
     gpu_count: int = 8
 
