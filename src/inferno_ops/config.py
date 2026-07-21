@@ -28,6 +28,7 @@ class InfernoConfig:
         throttle_detect_window_ticks: Recent-tick window size for throttle detection.
         sim_seed: Seed for the telemetry simulator's RNG, for reproducible demos.
         gpu_count: Number of simulated GPUs.
+        agent_max_tokens: Max output tokens for a single agent completion call.
     """
 
     anthropic_api_key: str | None
@@ -40,6 +41,7 @@ class InfernoConfig:
     throttle_detect_window_ticks: int = 5
     sim_seed: int = 42
     gpu_count: int = 8
+    agent_max_tokens: int = 2048
 
 
 def load_config() -> InfernoConfig:
