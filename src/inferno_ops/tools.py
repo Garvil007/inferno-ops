@@ -10,10 +10,12 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Sequence
+from dataclasses import asdict
 from typing import Any
 
 from inferno_ops.config import InfernoConfig, load_config
-from inferno_ops.telemetry import TelemetrySnapshot
+from inferno_ops.simulator import RackSimulator
+from inferno_ops.telemetry import EventRecord, TelemetrySnapshot
 
 
 def _group_by_gpu(
@@ -129,4 +131,130 @@ def detect_throttle_event(
     return flagged
 
 
-TOOLS: list[dict[str, Any]] = [READ_RACK_METRICS_SCHEMA, DETECT_THROTTLE_EVENT_SCHEMA]
+ADJUST_FLOW_RATE_SCHEMA: dict[str, Any] = {
+    "name": "adjust_flow_rate",
+    "description": (
+        "Simulate bumping the coolant pump for one GPU by a given amount "
+        "(liters per minute). Persists into subsequent readings."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "gpu_id": {"type": "integer", "description": "Index of the GPU to adjust."},
+            "delta_lpm": {
+                "type": "number",
+                "description": "Change in flow rate, liters per minute. May be negative.",
+            },
+        },
+        "required": ["gpu_id", "delta_lpm"],
+    },
+}
+
+
+def adjust_flow_rate(sim: RackSimulator, gpu_id: int, delta_lpm: float) -> dict[str, Any]:
+    """Bump a GPU's coolant flow rate on a live simulator and record the action.
+
+    Args:
+        sim: The running simulator instance to mutate.
+        gpu_id: Index of the GPU to adjust.
+        delta_lpm: Change in flow rate, liters per minute (may be negative).
+
+    Returns:
+        An ``EventRecord`` (as a dict) describing the action taken.
+    """
+    snap = sim.adjust_flow(gpu_id, delta_lpm)
+    record = EventRecord(
+        event_type="flow_adjustment",
+        gpu_id=gpu_id,
+        tick=snap.tick,
+        data={
+            "delta_lpm": delta_lpm,
+            "new_flow_lpm": snap.flow_lpm,
+        },
+    )
+    return asdict(record)
+
+
+GENERATE_RCA_SCHEMA: dict[str, Any] = {
+    "name": "generate_rca",
+    "description": (
+        "Generate a structured root-cause record for one GPU: temperature "
+        "delta, flow rate, power draw, suspected cause, and a recommended "
+        "action, based on a recent window of telemetry."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "gpu_id": {"type": "integer", "description": "Index of the GPU to analyze."},
+        },
+        "required": ["gpu_id"],
+    },
+}
+
+
+def generate_rca(
+    buffer: Sequence[TelemetrySnapshot],
+    gpu_id: int,
+    config: InfernoConfig | None = None,
+) -> dict[str, Any]:
+    """Generate a structured root-cause record for one GPU.
+
+    Looks at the GPU's most recent ``config.throttle_detect_window_ticks``
+    snapshots and derives a deterministic suspected cause and recommended
+    action from temperature trend, flow rate, and power draw.
+
+    Args:
+        buffer: Flat telemetry history to analyze.
+        gpu_id: Index of the GPU to analyze.
+        config: Runtime configuration; defaults to ``load_config()``.
+
+    Returns:
+        An ``EventRecord`` (as a dict) whose ``data`` field contains
+        temp_delta_c, flow_lpm, power_w, suspected_cause, recommended_action.
+
+    Raises:
+        ValueError: If the buffer has no entries for ``gpu_id``.
+    """
+    cfg = config or load_config()
+    grouped = _group_by_gpu(buffer)
+    snaps = grouped.get(gpu_id, [])
+    if not snaps:
+        raise ValueError(f"No telemetry for gpu_id={gpu_id}")
+
+    window = snaps[-cfg.throttle_detect_window_ticks :]
+    latest = window[-1]
+    temp_delta_c = round(latest.temp_c - window[0].temp_c, 2)
+    rack_flows = [s[-1].flow_lpm for s in grouped.values() if s]
+    median_flow = sorted(rack_flows)[len(rack_flows) // 2]
+
+    if temp_delta_c > 0 and latest.flow_lpm < median_flow:
+        suspected_cause = "insufficient coolant flow"
+        recommended_action = "increase coolant flow rate"
+    elif temp_delta_c > 0 and latest.power_w > window[0].power_w:
+        suspected_cause = "sustained high power draw"
+        recommended_action = "investigate workload / verify power delivery"
+    else:
+        suspected_cause = "no significant anomaly detected"
+        recommended_action = "monitor, no action required"
+
+    record = EventRecord(
+        event_type="root_cause_analysis",
+        gpu_id=gpu_id,
+        tick=latest.tick,
+        data={
+            "temp_delta_c": temp_delta_c,
+            "flow_lpm": latest.flow_lpm,
+            "power_w": latest.power_w,
+            "suspected_cause": suspected_cause,
+            "recommended_action": recommended_action,
+        },
+    )
+    return asdict(record)
+
+
+TOOLS: list[dict[str, Any]] = [
+    READ_RACK_METRICS_SCHEMA,
+    DETECT_THROTTLE_EVENT_SCHEMA,
+    ADJUST_FLOW_RATE_SCHEMA,
+    GENERATE_RCA_SCHEMA,
+]

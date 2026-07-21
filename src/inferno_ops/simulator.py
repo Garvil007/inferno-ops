@@ -103,6 +103,28 @@ class RackSimulator:
         self._throttle(gpu)
         return self._to_snapshot(gpu)
 
+    def adjust_flow(self, gpu_id: int, delta_lpm: float) -> TelemetrySnapshot:
+        """Bump one GPU's coolant flow rate, e.g. simulating a pump adjustment.
+
+        The change persists into subsequent ticks: ``_drift`` random-walks
+        flow off whatever the current value is, so a boosted baseline stays
+        elevated for many ticks rather than resetting immediately.
+
+        Args:
+            gpu_id: Index of the GPU to adjust.
+            delta_lpm: Change in flow rate, liters per minute (may be negative).
+
+        Returns:
+            The updated snapshot for that GPU.
+
+        Raises:
+            IndexError: If ``gpu_id`` is out of range.
+        """
+        gpu = self._gpus[gpu_id]
+        gpu.flow_lpm = _clamp(gpu.flow_lpm + delta_lpm, _FLOW_MIN_LPM, _FLOW_MAX_LPM)
+        logger.info("GPU %d flow adjusted by %.2fL/min, now %.2fL/min", gpu_id, delta_lpm, gpu.flow_lpm)
+        return self._to_snapshot(gpu)
+
     def _drift(self, gpu: _GpuState) -> None:
         """Apply one tick of bounded, correlated random walk to a GPU's state."""
         temp_delta = self._rng.uniform(-_TEMP_STEP_C, _TEMP_STEP_C)

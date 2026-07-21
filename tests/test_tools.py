@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import pytest
+
 from inferno_ops.config import InfernoConfig
 from inferno_ops.simulator import RackSimulator
 from inferno_ops.telemetry import TelemetrySnapshot
-from inferno_ops.tools import detect_throttle_event, read_rack_metrics
+from inferno_ops.tools import (
+    adjust_flow_rate,
+    detect_throttle_event,
+    generate_rca,
+    read_rack_metrics,
+)
 
 
 def _make_config(**overrides: object) -> InfernoConfig:
@@ -136,3 +143,64 @@ def test_tools_work_against_real_simulator_output() -> None:
         previously_throttled |= {s.gpu_id for s in buffer[-config.gpu_count :] if s.throttled}
 
     assert detected_at_transition
+
+
+def test_generate_rca_returns_expected_shape_and_fields() -> None:
+    """RCA record is a structured EventRecord dict with the required data fields."""
+    config = _make_config()
+    buffer = [
+        _snap(0, 1, 1800.0, temp_c=50.0),
+        _snap(0, 2, 1780.0, temp_c=55.0),
+        _snap(0, 3, 1760.0, temp_c=60.0),
+    ]
+
+    record = generate_rca(buffer, gpu_id=0, config=config)
+
+    assert record["event_type"] == "root_cause_analysis"
+    assert record["gpu_id"] == 0
+    assert record["tick"] == 3
+    data = record["data"]
+    assert set(data.keys()) == {
+        "temp_delta_c",
+        "flow_lpm",
+        "power_w",
+        "suspected_cause",
+        "recommended_action",
+    }
+    assert isinstance(data["temp_delta_c"], float)
+    assert isinstance(data["flow_lpm"], float)
+    assert isinstance(data["power_w"], float)
+    assert isinstance(data["suspected_cause"], str) and data["suspected_cause"]
+    assert isinstance(data["recommended_action"], str) and data["recommended_action"]
+    assert data["temp_delta_c"] == 10.0
+
+
+def test_generate_rca_raises_for_unknown_gpu() -> None:
+    """Analyzing a GPU absent from the buffer is a clear error, not silent output."""
+    config = _make_config()
+    buffer = [_snap(0, 1, 1800.0)]
+
+    with pytest.raises(ValueError):
+        generate_rca(buffer, gpu_id=99, config=config)
+
+
+def test_adjust_flow_rate_changes_later_readings_for_targeted_gpu() -> None:
+    """Bumping flow on one GPU measurably raises its subsequent flow readings."""
+    config = _make_config(gpu_count=4, sim_seed=11)
+    sim = RackSimulator(config=config, seed=11)
+
+    sim.step()  # let it settle a bit
+    baseline = {s.gpu_id: s.flow_lpm for s in sim.step()}
+
+    record = adjust_flow_rate(sim, gpu_id=1, delta_lpm=5.0)
+
+    assert record["event_type"] == "flow_adjustment"
+    assert record["gpu_id"] == 1
+    assert record["data"]["delta_lpm"] == 5.0
+    assert record["data"]["new_flow_lpm"] > baseline[1]
+
+    later = {s.gpu_id: s.flow_lpm for s in sim.step()}
+
+    assert later[1] > baseline[1] + 2.0
+    for gpu_id in (0, 2, 3):
+        assert abs(later[gpu_id] - baseline[gpu_id]) < 2.0
