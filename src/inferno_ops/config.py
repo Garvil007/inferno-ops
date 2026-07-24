@@ -31,6 +31,8 @@ class InfernoConfig:
         agent_max_tokens: Max output tokens for a single agent completion call.
         agent_max_tool_iterations: Max tool-use round-trips per agent cycle,
             to bound the loop if the model keeps requesting tools.
+        dashboard_buffer_maxlen: Max telemetry snapshots kept per GPU in the
+            dashboard's rolling history buffer.
     """
 
     anthropic_api_key: str | None
@@ -45,6 +47,7 @@ class InfernoConfig:
     gpu_count: int = 8
     agent_max_tokens: int = 2048
     agent_max_tool_iterations: int = 6
+    dashboard_buffer_maxlen: int = 200
 
 
 def load_config() -> InfernoConfig:
