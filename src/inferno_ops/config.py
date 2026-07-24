@@ -29,6 +29,8 @@ class InfernoConfig:
         sim_seed: Seed for the telemetry simulator's RNG, for reproducible demos.
         gpu_count: Number of simulated GPUs.
         agent_max_tokens: Max output tokens for a single agent completion call.
+        agent_max_tool_iterations: Max tool-use round-trips per agent cycle,
+            to bound the loop if the model keeps requesting tools.
     """
 
     anthropic_api_key: str | None
@@ -42,6 +44,7 @@ class InfernoConfig:
     sim_seed: int = 42
     gpu_count: int = 8
     agent_max_tokens: int = 2048
+    agent_max_tool_iterations: int = 6
 
 
 def load_config() -> InfernoConfig:
