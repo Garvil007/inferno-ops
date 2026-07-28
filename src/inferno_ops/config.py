@@ -35,6 +35,11 @@ class InfernoConfig:
             dashboard's rolling history buffer.
         dashboard_decision_log_maxlen: Max agent decision entries kept in the
             dashboard's scrolling event log.
+        pue_pump_power_per_lpm_w: Modeled cooling-pump power draw per liter/min
+            of total coolant flow, used to estimate PUE from telemetry.
+        pue_fixed_overhead_w: Modeled fixed facility overhead power (lighting,
+            networking, etc.), used to estimate PUE from telemetry.
+        pue_round_digits: Decimal places to round the computed PUE readout to.
     """
 
     anthropic_api_key: str | None
@@ -51,6 +56,9 @@ class InfernoConfig:
     agent_max_tool_iterations: int = 6
     dashboard_buffer_maxlen: int = 200
     dashboard_decision_log_maxlen: int = 50
+    pue_pump_power_per_lpm_w: float = 15.0
+    pue_fixed_overhead_w: float = 500.0
+    pue_round_digits: int = 3
 
 
 def load_config() -> InfernoConfig:

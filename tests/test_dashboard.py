@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from inferno_ops.config import InfernoConfig
 from inferno_ops.dashboard import (
+    compute_pue,
     latest_snapshot_per_gpu,
+    rack_health_emoji,
+    rack_health_status,
     status_emoji,
     temp_series_by_gpu,
     temp_status,
+    throttled_gpu_ids,
 )
 from inferno_ops.telemetry import TelemetrySnapshot
 
@@ -24,16 +28,23 @@ def _make_config(**overrides: object) -> InfernoConfig:
     return InfernoConfig(**base)
 
 
-def _snap(gpu_id: int, tick: int, temp_c: float) -> TelemetrySnapshot:
+def _snap(
+    gpu_id: int,
+    tick: int,
+    temp_c: float,
+    power_w: float = 250.0,
+    flow_lpm: float = 14.0,
+    throttled: bool = False,
+) -> TelemetrySnapshot:
     """Build a synthetic snapshot with only the fields tests care about set explicitly."""
     return TelemetrySnapshot(
         gpu_id=gpu_id,
         tick=tick,
         temp_c=temp_c,
         clock_mhz=1800.0,
-        power_w=250.0,
-        flow_lpm=14.0,
-        throttled=False,
+        power_w=power_w,
+        flow_lpm=flow_lpm,
+        throttled=throttled,
     )
 
 
@@ -110,3 +121,111 @@ def test_temp_series_by_gpu_keys_are_sorted_by_gpu_id() -> None:
     series = temp_series_by_gpu(buffer)
 
     assert list(series.keys()) == ["gpu_0", "gpu_1"]
+
+
+def test_rack_health_status_all_normal_is_healthy() -> None:
+    """A rack with every GPU below warning is healthy."""
+    config = _make_config()
+    latest = {0: _snap(0, 1, 50.0), 1: _snap(1, 1, 55.0)}
+
+    assert rack_health_status(latest, config) == "healthy"
+
+
+def test_rack_health_status_one_warning_gpu_makes_rack_warning() -> None:
+    """One GPU at warning level is enough to mark the whole rack warning."""
+    config = _make_config()
+    latest = {0: _snap(0, 1, 50.0), 1: _snap(1, 1, 78.0)}
+
+    assert rack_health_status(latest, config) == "warning"
+
+
+def test_rack_health_status_throttle_tier_collapses_to_warning() -> None:
+    """A GPU at throttle-tier temp (below critical) still reads as rack warning."""
+    config = _make_config()
+    latest = {0: _snap(0, 1, 87.0)}
+
+    assert rack_health_status(latest, config) == "warning"
+
+
+def test_rack_health_status_one_critical_gpu_makes_rack_critical() -> None:
+    """A single critical GPU dominates even if every other GPU is healthy."""
+    config = _make_config()
+    latest = {0: _snap(0, 1, 50.0), 1: _snap(1, 1, 96.0)}
+
+    assert rack_health_status(latest, config) == "critical"
+
+
+def test_rack_health_status_empty_latest_is_healthy() -> None:
+    """No readings yet (first tick) defaults to healthy, not an error."""
+    config = _make_config()
+
+    assert rack_health_status({}, config) == "healthy"
+
+
+def test_rack_health_emoji_returns_distinct_emoji_per_status() -> None:
+    """Every rack-health status maps to a distinct emoji indicator."""
+    statuses = ["healthy", "warning", "critical"]
+    emojis = {rack_health_emoji(status) for status in statuses}
+    assert len(emojis) == len(statuses)
+
+
+def test_throttled_gpu_ids_returns_only_throttled_gpus_sorted() -> None:
+    """Only GPUs with throttled=True are reported, sorted by gpu_id."""
+    latest = {
+        2: _snap(2, 1, 90.0, throttled=True),
+        0: _snap(0, 1, 50.0, throttled=False),
+        1: _snap(1, 1, 88.0, throttled=True),
+    }
+
+    assert throttled_gpu_ids(latest) == [1, 2]
+
+
+def test_throttled_gpu_ids_empty_when_none_throttled() -> None:
+    """A fully healthy rack reports no throttled GPUs."""
+    latest = {0: _snap(0, 1, 50.0, throttled=False)}
+
+    assert throttled_gpu_ids(latest) == []
+
+
+def test_compute_pue_matches_expected_ratio_for_known_inputs() -> None:
+    """PUE = (IT power + pump power + overhead) / IT power, for known values."""
+    config = _make_config(
+        pue_pump_power_per_lpm_w=10.0,
+        pue_fixed_overhead_w=100.0,
+        pue_round_digits=3,
+    )
+    latest = {
+        0: _snap(0, 1, 50.0, power_w=200.0, flow_lpm=10.0),
+        1: _snap(1, 1, 50.0, power_w=200.0, flow_lpm=10.0),
+    }
+    # it_power=400, pump_power=20*10=200, overhead=100 -> (400+200+100)/400 = 1.75
+    assert compute_pue(latest, config) == 1.75
+
+
+def test_compute_pue_rounds_to_configured_digits() -> None:
+    """The PUE result respects config.pue_round_digits."""
+    config = _make_config(
+        pue_pump_power_per_lpm_w=1.0,
+        pue_fixed_overhead_w=1.0,
+        pue_round_digits=2,
+    )
+    latest = {0: _snap(0, 1, 50.0, power_w=300.0, flow_lpm=7.0)}
+
+    result = compute_pue(latest, config)
+
+    assert result == round(result, 2)
+
+
+def test_compute_pue_empty_latest_returns_none() -> None:
+    """No telemetry yet (first tick) means PUE is undefined, not zero."""
+    config = _make_config()
+
+    assert compute_pue({}, config) is None
+
+
+def test_compute_pue_zero_it_power_returns_none() -> None:
+    """Zero IT power draw would divide by zero; PUE is undefined instead."""
+    config = _make_config()
+    latest = {0: _snap(0, 1, 50.0, power_w=0.0)}
+
+    assert compute_pue(latest, config) is None

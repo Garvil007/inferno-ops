@@ -16,10 +16,14 @@ import streamlit as st
 from inferno_ops.agent import AgentDecision, build_client, run_agent_cycle
 from inferno_ops.config import load_config
 from inferno_ops.dashboard import (
+    compute_pue,
     latest_snapshot_per_gpu,
+    rack_health_emoji,
+    rack_health_status,
     status_emoji,
     temp_series_by_gpu,
     temp_status,
+    throttled_gpu_ids,
 )
 from inferno_ops.logging_config import configure_logging
 from inferno_ops.simulator import RackSimulator
@@ -62,6 +66,22 @@ def render_dashboard() -> None:
     buffer.extend(sim.step())
 
     latest = latest_snapshot_per_gpu(buffer)
+
+    throttled = throttled_gpu_ids(latest)
+    if throttled:
+        st.error(f"\U0001f6a8 THROTTLE ALERT — GPU(s) {throttled} currently throttled")
+
+    health = rack_health_status(latest, config)
+    pue = compute_pue(latest, config)
+    status_col, pue_col = st.columns(2)
+    with status_col:
+        st.metric(label="Rack health", value=f"{rack_health_emoji(health)} {health.title()}")
+    with pue_col:
+        st.metric(
+            label="PUE",
+            value=f"{pue:.{config.pue_round_digits}f}" if pue is not None else "N/A",
+        )
+
     columns = st.columns(len(latest))
     for col, gpu_id in zip(columns, sorted(latest)):
         snap = latest[gpu_id]
