@@ -33,6 +33,8 @@ class InfernoConfig:
             to bound the loop if the model keeps requesting tools.
         dashboard_buffer_maxlen: Max telemetry snapshots kept per GPU in the
             dashboard's rolling history buffer.
+        dashboard_decision_log_maxlen: Max agent decision entries kept in the
+            dashboard's scrolling event log.
     """
 
     anthropic_api_key: str | None
@@ -48,6 +50,7 @@ class InfernoConfig:
     agent_max_tokens: int = 2048
     agent_max_tool_iterations: int = 6
     dashboard_buffer_maxlen: int = 200
+    dashboard_decision_log_maxlen: int = 50
 
 
 def load_config() -> InfernoConfig:

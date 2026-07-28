@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any
 
-from inferno_ops.agent import run_agent_loop
+from inferno_ops.agent import run_agent_cycle, run_agent_loop, summarize_decision
 from inferno_ops.config import InfernoConfig
 from inferno_ops.simulator import RackSimulator
 from inferno_ops.telemetry import TelemetrySnapshot
@@ -135,6 +136,26 @@ def test_tool_execution_error_is_reported_as_tool_result_not_a_crash() -> None:
     assert result.stop_reason == "end_turn"
 
 
+def test_run_agent_loop_populates_trace_when_provided() -> None:
+    """Passing a trace list captures each executed tool call without changing the return."""
+    config = _make_config()
+    sim, buffer = _seeded_buffer(config)
+    trace: list[dict[str, Any]] = []
+
+    responses = [
+        _message([_tool_use_block("read_rack_metrics", {}, "id1")], "tool_use"),
+        _message([_text_block("Done.")], "end_turn"),
+    ]
+    client = _FakeClient(responses)
+
+    result = run_agent_loop(client, config, sim, buffer, trace=trace)
+
+    assert result is not None
+    assert len(trace) == 1
+    assert trace[0]["name"] == "read_rack_metrics"
+    assert trace[0]["is_error"] is False
+
+
 def test_multiple_tool_use_blocks_in_one_response_are_all_executed() -> None:
     """A single response requesting two tools at once gets both results returned together."""
     config = _make_config()
@@ -156,3 +177,94 @@ def test_multiple_tool_use_blocks_in_one_response_are_all_executed() -> None:
 
     assert result is not None
     assert result.stop_reason == "end_turn"
+
+
+def _rca_result(gpu_id: int, suspected_cause: str) -> dict[str, Any]:
+    """Build a synthetic generate_rca-shaped result (matches EventRecord asdict shape)."""
+    return {
+        "event_type": "root_cause_analysis",
+        "gpu_id": gpu_id,
+        "tick": 10,
+        "data": {
+            "temp_delta_c": 5.0,
+            "flow_lpm": 10.0,
+            "power_w": 300.0,
+            "suspected_cause": suspected_cause,
+            "recommended_action": "increase coolant flow rate",
+        },
+    }
+
+
+def test_summarize_decision_reports_detection_action_and_explanation() -> None:
+    """A throttle-then-RCA-then-adjust trace summarizes to a coherent decision."""
+    trace = [
+        {
+            "name": "detect_throttle_event",
+            "input": {},
+            "result": json.dumps([{"gpu_id": 2, "drop_pct": 0.3}]),
+            "is_error": False,
+        },
+        {
+            "name": "generate_rca",
+            "input": {"gpu_id": 2},
+            "result": json.dumps(_rca_result(2, "insufficient coolant flow")),
+            "is_error": False,
+        },
+        {
+            "name": "adjust_flow_rate",
+            "input": {"gpu_id": 2, "delta_lpm": 2.0},
+            "result": json.dumps({"event_type": "flow_adjustment"}),
+            "is_error": False,
+        },
+    ]
+    response = SimpleNamespace(
+        content=[_text_block("GPU 2 throttled at high temp; increased flow by 2.0 L/min.")]
+    )
+
+    decision = summarize_decision(response, trace)
+
+    assert "GPU 2" in decision.detected
+    assert "insufficient coolant flow" in decision.detected
+    assert "GPU 2" in decision.action
+    assert "2.0" in decision.action
+    assert "increased flow" in decision.explanation
+    assert decision.timestamp
+
+
+def test_summarize_decision_healthy_case_reports_no_action() -> None:
+    """No tool calls at all (healthy rack) summarizes to 'no throttle' / 'no action'."""
+    response = SimpleNamespace(content=[_text_block("Rack looks fine, no action needed.")])
+
+    decision = summarize_decision(response, trace=[])
+
+    assert decision.detected == "No throttle detected"
+    assert decision.action == "No action taken"
+    assert "no action needed" in decision.explanation
+
+
+def test_summarize_decision_handles_failed_cycle_without_crashing() -> None:
+    """A None response (API error or iteration cap) still produces a valid decision."""
+    decision = summarize_decision(response=None, trace=[])
+
+    assert decision.detected == "No throttle detected"
+    assert decision.action == "No action taken"
+    assert "did not complete" in decision.explanation
+
+
+def test_run_agent_cycle_end_to_end_with_fake_client() -> None:
+    """run_agent_cycle wires run_agent_loop + trace + summarize_decision together."""
+    config = _make_config()
+    sim, buffer = _seeded_buffer(config)
+
+    responses = [
+        _message([_tool_use_block("detect_throttle_event", {}, "id1")], "tool_use"),
+        _message([_text_block("No throttle found, nothing to do.")], "end_turn"),
+    ]
+    client = _FakeClient(responses)
+
+    decision = run_agent_cycle(client, config, sim, buffer)
+
+    assert decision.detected == "No throttle detected"
+    assert decision.action == "No action taken"
+    assert "nothing to do" in decision.explanation
+    assert decision.timestamp

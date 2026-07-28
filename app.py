@@ -1,18 +1,19 @@
 """InfernoOps Streamlit dashboard entrypoint.
 
-Orchestration only: no business logic here. Day 7 scope — wire the
-simulator into a session-state-backed rolling telemetry buffer, show
-per-GPU temperature metrics with color logic, and chart temperature over
-time. No agent/Claude wiring yet.
+Orchestration only: no business logic here. Day 8 scope — invoke the agent
+every refresh tick and render its decisions in a scrolling event log,
+alongside the Day 7 rolling telemetry buffer, per-GPU metrics, and chart.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from collections import deque
 
 import streamlit as st
 
+from inferno_ops.agent import AgentDecision, build_client, run_agent_cycle
 from inferno_ops.config import load_config
 from inferno_ops.dashboard import (
     latest_snapshot_per_gpu,
@@ -31,6 +32,12 @@ config = load_config()
 if "sim" not in st.session_state:
     st.session_state.sim = RackSimulator(config=config, seed=config.sim_seed)
     st.session_state.buffer = deque(maxlen=config.dashboard_buffer_maxlen * config.gpu_count)
+    st.session_state.decision_log = deque(maxlen=config.dashboard_decision_log_maxlen)
+    try:
+        st.session_state.client = build_client(config)
+    except RuntimeError as exc:
+        logger.warning("agent client unavailable: %s", exc)
+        st.session_state.client = None
     logger.info("dashboard state initialized: gpu_count=%d", config.gpu_count)
 
 st.set_page_config(page_title="InfernoOps", page_icon="\U0001f525", layout="wide")
@@ -40,14 +47,17 @@ st.caption(f"model: {config.model_name} | refresh: {config.refresh_interval_s}s"
 
 @st.fragment(run_every=config.refresh_interval_s)
 def render_dashboard() -> None:
-    """Advance the simulator one tick and render the live rack view.
+    """Advance the simulator one tick, invoke the agent, and render the live view.
 
     Isolated as a fragment so only this block reruns on each tick. The
-    simulator and buffer live in ``st.session_state``, initialized once
-    above, so history survives every rerun instead of resetting.
+    simulator, buffer, client, and decision log all live in
+    ``st.session_state``, initialized once above, so history survives every
+    rerun instead of resetting.
     """
     sim: RackSimulator = st.session_state.sim
     buffer: deque = st.session_state.buffer
+    client = st.session_state.client
+    decision_log: deque[AgentDecision] = st.session_state.decision_log
 
     buffer.extend(sim.step())
 
@@ -65,6 +75,26 @@ def render_dashboard() -> None:
             )
 
     st.line_chart(temp_series_by_gpu(buffer))
+
+    if client is not None:
+        decision = run_agent_cycle(client, config, sim, list(buffer))
+    else:
+        decision = AgentDecision(
+            timestamp=time.strftime("%H:%M:%S"),
+            detected="N/A",
+            action="N/A",
+            explanation="Agent unavailable: ANTHROPIC_API_KEY missing from environment.",
+        )
+    decision_log.append(decision)
+
+    st.subheader("Agent decision log")
+    with st.container(height=300):
+        for entry in reversed(decision_log):
+            st.markdown(
+                f"**{entry.timestamp}** — detected: {entry.detected} | "
+                f"action: {entry.action}\n\n_{entry.explanation}_"
+            )
+            st.divider()
 
 
 render_dashboard()

@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import anthropic
@@ -137,6 +139,7 @@ def run_agent_loop(
     config: InfernoConfig,
     sim: RackSimulator,
     buffer: list[TelemetrySnapshot],
+    trace: list[dict[str, Any]] | None = None,
 ) -> Message | None:
     """Run one full agent cycle: send metrics, execute requested tools, repeat.
 
@@ -152,6 +155,9 @@ def run_agent_loop(
         sim: Live simulator instance, mutated by action tools like
             ``adjust_flow_rate``.
         buffer: Flat telemetry history to summarize as the latest snapshot.
+        trace: Optional list to append ``{"name", "input", "result"}`` records
+            to for every tool call executed this cycle, in order. Left
+            untouched (``None``) by default so existing callers are unaffected.
 
     Returns:
         The final ``Message`` once the model stops requesting tools, or
@@ -198,11 +204,144 @@ def run_agent_loop(
         tool_results = [_execute_tool_call(b, dispatch) for b in tool_use_blocks]
         messages.append({"role": "user", "content": tool_results})
 
+        if trace is not None:
+            for block, result in zip(tool_use_blocks, tool_results):
+                trace.append(
+                    {
+                        "name": block.name,
+                        "input": block.input,
+                        "result": result["content"],
+                        "is_error": result.get("is_error", False),
+                    }
+                )
+
     logger.warning(
         "hit agent_max_tool_iterations=%d without a final answer",
         config.agent_max_tool_iterations,
     )
     return None
+
+
+@dataclass(frozen=True)
+class AgentDecision:
+    """One dashboard-loggable summary of a single agent cycle.
+
+    Attributes:
+        timestamp: Wall-clock time the cycle completed, ``HH:MM:SS``.
+        detected: What the agent found (e.g. a throttled GPU with its
+            reading), or a healthy/failure statement.
+        action: The concrete action taken (e.g. a flow-rate adjustment), or
+            "No action taken".
+        explanation: The agent's own narrated reasoning, taken verbatim from
+            its final text response.
+    """
+
+    timestamp: str
+    detected: str
+    action: str
+    explanation: str
+
+
+def _detected_summary(trace: list[dict[str, Any]]) -> str:
+    """Build the "what was detected" line from a tool-call trace.
+
+    Args:
+        trace: Tool-call records collected by ``run_agent_loop``.
+
+    Returns:
+        A human-readable summary drawn from the ``detect_throttle_event`` and
+        ``generate_rca`` calls in ``trace``, or "No throttle detected" if
+        neither ran or neither found anything.
+    """
+    for record in trace:
+        if record["name"] == "generate_rca" and not record["is_error"]:
+            rca = json.loads(record["result"])
+            return f"GPU {record['input'].get('gpu_id')} root cause: {rca.get('data', rca)}"
+    for record in trace:
+        if record["name"] == "detect_throttle_event" and not record["is_error"]:
+            result = json.loads(record["result"])
+            if result:
+                return f"Throttle detected: {result}"
+    return "No throttle detected"
+
+
+def _action_summary(trace: list[dict[str, Any]]) -> str:
+    """Build the "what action was taken" line from a tool-call trace.
+
+    Args:
+        trace: Tool-call records collected by ``run_agent_loop``.
+
+    Returns:
+        A human-readable summary of the ``adjust_flow_rate`` call in
+        ``trace``, or "No action taken" if none ran.
+    """
+    for record in trace:
+        if record["name"] == "adjust_flow_rate" and not record["is_error"]:
+            gpu_id = record["input"].get("gpu_id")
+            delta = record["input"].get("delta_lpm")
+            return f"Adjusted GPU {gpu_id} coolant flow by {delta} L/min"
+    return "No action taken"
+
+
+def _explanation_summary(response: Message | None) -> str:
+    """Extract the agent's final narrated explanation from its response.
+
+    Args:
+        response: The final ``Message`` from ``run_agent_loop``, or ``None``
+            if the cycle failed.
+
+    Returns:
+        The concatenated text of the response, or a failure statement.
+    """
+    if response is None:
+        return "Agent cycle did not complete (API error or iteration cap; see logs)."
+    text_blocks = [b.text for b in response.content if b.type == "text" and b.text]
+    return " ".join(text_blocks) if text_blocks else "(agent gave no narrated explanation)"
+
+
+def summarize_decision(
+    response: Message | None, trace: list[dict[str, Any]]
+) -> AgentDecision:
+    """Reduce one agent cycle's response and tool trace to a loggable decision.
+
+    Args:
+        response: The final ``Message`` from ``run_agent_loop``, or ``None``
+            if the cycle failed.
+        trace: Tool-call records collected during that same cycle.
+
+    Returns:
+        A timestamped ``AgentDecision`` summarizing what was detected, what
+        action was taken, and why.
+    """
+    return AgentDecision(
+        timestamp=time.strftime("%H:%M:%S"),
+        detected=_detected_summary(trace),
+        action=_action_summary(trace),
+        explanation=_explanation_summary(response),
+    )
+
+
+def run_agent_cycle(
+    client: anthropic.Anthropic,
+    config: InfernoConfig,
+    sim: RackSimulator,
+    buffer: list[TelemetrySnapshot],
+) -> AgentDecision:
+    """Run one agent cycle and reduce it to a single dashboard-loggable decision.
+
+    Args:
+        client: Configured Anthropic client.
+        config: Runtime configuration.
+        sim: Live simulator instance, mutated by action tools.
+        buffer: Flat telemetry history for this cycle.
+
+    Returns:
+        A timestamped ``AgentDecision`` for this cycle, safe to append
+        directly to a scrolling dashboard event log.
+    """
+    trace: list[dict[str, Any]] = []
+    response = run_agent_loop(client, config, sim, buffer, trace=trace)
+    return summarize_decision(response, trace)
 
 
 def _run_scenario(label: str, config: InfernoConfig, client: anthropic.Anthropic) -> None:
