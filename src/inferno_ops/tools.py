@@ -228,14 +228,40 @@ def generate_rca(
     median_flow = sorted(rack_flows)[len(rack_flows) // 2]
 
     if temp_delta_c > 0 and latest.flow_lpm < median_flow:
-        suspected_cause = "insufficient coolant flow"
-        recommended_action = "increase coolant flow rate"
+        flow_deficit = round(median_flow - latest.flow_lpm, 2)
+        suspected_cause = (
+            f"insufficient coolant flow: {latest.flow_lpm} L/min vs rack "
+            f"median {median_flow} L/min while temp rose {temp_delta_c}C "
+            f"over the last {len(window)} ticks"
+        )
+        recommended_action = (
+            f"increase coolant flow rate by {flow_deficit} L/min "
+            f"(from {latest.flow_lpm} to at least {median_flow} L/min)"
+        )
     elif temp_delta_c > 0 and latest.power_w > window[0].power_w:
-        suspected_cause = "sustained high power draw"
-        recommended_action = "investigate workload / verify power delivery"
+        power_delta_w = round(latest.power_w - window[0].power_w, 2)
+        flow_bump = round(temp_delta_c * cfg.rca_power_case_flow_bump_per_c, 2)
+        suspected_cause = (
+            f"sustained high power draw: {window[0].power_w}W to "
+            f"{latest.power_w}W (+{power_delta_w}W) over the last "
+            f"{len(window)} ticks, temp rose {temp_delta_c}C"
+        )
+        recommended_action = (
+            f"verify workload/power delivery (power draw +{power_delta_w}W); "
+            f"as an interim mitigation, increase coolant flow by "
+            f"{flow_bump} L/min to offset the {temp_delta_c}C rise"
+        )
     else:
-        suspected_cause = "no significant anomaly detected"
-        recommended_action = "monitor, no action required"
+        suspected_cause = (
+            f"no significant anomaly detected: temp change {temp_delta_c}C, "
+            f"flow {latest.flow_lpm} L/min (rack median {median_flow} L/min), "
+            f"power {latest.power_w}W"
+        )
+        recommended_action = (
+            f"monitor only — temp change {temp_delta_c}C and flow "
+            f"{latest.flow_lpm} L/min are within normal range, no "
+            f"corrective action required"
+        )
 
     record = EventRecord(
         event_type="root_cause_analysis",

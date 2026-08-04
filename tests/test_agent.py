@@ -9,6 +9,9 @@ from typing import Any
 import anthropic
 
 from inferno_ops.agent import (
+    CHAT_SYSTEM_PROMPT,
+    GROUNDING_RULE,
+    SYSTEM_PROMPT,
     answer_chat_question,
     run_agent_cycle,
     run_agent_loop,
@@ -346,3 +349,9 @@ def test_answer_chat_question_handles_failed_cycle_without_crashing() -> None:
     answer = answer_chat_question(_RaisingClient(), config, sim, buffer, "is everything ok?")
 
     assert "did not complete" in answer
+
+
+def test_grounding_rule_lives_in_one_place_and_both_prompts_use_it() -> None:
+    """SYSTEM_PROMPT and CHAT_SYSTEM_PROMPT both interpolate the single shared rule."""
+    assert GROUNDING_RULE in SYSTEM_PROMPT
+    assert GROUNDING_RULE in CHAT_SYSTEM_PROMPT

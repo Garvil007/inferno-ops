@@ -42,6 +42,10 @@ class InfernoConfig:
         pue_round_digits: Decimal places to round the computed PUE readout to.
         dashboard_chat_history_maxlen: Max chat messages (user + assistant
             combined) kept in the dashboard's chat history.
+        rca_power_case_flow_bump_per_c: Suggested coolant-flow bump (L/min per
+            degree C of temp rise) generate_rca recommends as an interim
+            mitigation when the suspected cause is high power draw rather
+            than insufficient flow.
     """
 
     anthropic_api_key: str | None
@@ -62,6 +66,7 @@ class InfernoConfig:
     pue_fixed_overhead_w: float = 500.0
     pue_round_digits: int = 3
     dashboard_chat_history_maxlen: int = 40
+    rca_power_case_flow_bump_per_c: float = 0.5
 
 
 def load_config() -> InfernoConfig:

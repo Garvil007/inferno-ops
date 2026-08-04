@@ -29,15 +29,22 @@ def _make_config(**overrides: object) -> InfernoConfig:
     return InfernoConfig(**base)
 
 
-def _snap(gpu_id: int, tick: int, clock_mhz: float, temp_c: float = 50.0) -> TelemetrySnapshot:
+def _snap(
+    gpu_id: int,
+    tick: int,
+    clock_mhz: float,
+    temp_c: float = 50.0,
+    power_w: float = 250.0,
+    flow_lpm: float = 14.0,
+) -> TelemetrySnapshot:
     """Build a synthetic snapshot with only the fields tests care about set explicitly."""
     return TelemetrySnapshot(
         gpu_id=gpu_id,
         tick=tick,
         temp_c=temp_c,
         clock_mhz=clock_mhz,
-        power_w=250.0,
-        flow_lpm=14.0,
+        power_w=power_w,
+        flow_lpm=flow_lpm,
         throttled=False,
     )
 
@@ -182,6 +189,86 @@ def test_generate_rca_raises_for_unknown_gpu() -> None:
 
     with pytest.raises(ValueError):
         generate_rca(buffer, gpu_id=99, config=config)
+
+
+def _flow_scenario_data() -> dict[str, object]:
+    """Build the insufficient-flow RCA scenario and return its data dict."""
+    config = _make_config()
+    buffer = [
+        _snap(0, t, 1800.0, temp_c=50.0 + t, flow_lpm=10.0) for t in range(1, 6)
+    ] + [
+        _snap(1, 1, 1800.0, flow_lpm=14.0),
+        _snap(2, 1, 1800.0, flow_lpm=14.0),
+    ]
+    return generate_rca(buffer, gpu_id=0, config=config)["data"]
+
+
+def _power_scenario_data() -> dict[str, object]:
+    """Build the high-power-draw RCA scenario and return its data dict."""
+    config = _make_config()
+    buffer = [
+        _snap(0, t, 1800.0, temp_c=50.0 + t, power_w=250.0 + 10.0 * t, flow_lpm=16.0)
+        for t in range(1, 6)
+    ] + [
+        _snap(1, 1, 1800.0, flow_lpm=14.0),
+        _snap(2, 1, 1800.0, flow_lpm=14.0),
+    ]
+    return generate_rca(buffer, gpu_id=0, config=config)["data"]
+
+
+def _healthy_scenario_data() -> dict[str, object]:
+    """Build the no-anomaly RCA scenario and return its data dict."""
+    config = _make_config()
+    buffer = [_snap(0, t, 1800.0, temp_c=50.0, flow_lpm=14.0) for t in range(1, 6)]
+    return generate_rca(buffer, gpu_id=0, config=config)["data"]
+
+
+def test_generate_rca_flow_scenario_cites_real_numbers_and_concrete_bump() -> None:
+    """Insufficient-flow scenario: report cites the exact flow deficit and target."""
+    data = _flow_scenario_data()
+
+    assert "10.0" in data["suspected_cause"]
+    assert "14.0" in data["suspected_cause"]
+    assert "4.0" in data["suspected_cause"]  # temp_delta_c: 55.0 - 51.0
+    assert "4.0" in data["recommended_action"]  # flow deficit: 14.0 - 10.0
+    assert "10.0" in data["recommended_action"]
+    assert "14.0" in data["recommended_action"]
+
+
+def test_generate_rca_power_scenario_cites_real_numbers_and_flow_bump() -> None:
+    """High-power scenario: report cites the power delta and a numeric interim flow bump."""
+    data = _power_scenario_data()
+
+    assert "260.0" in data["suspected_cause"]  # window[0] power: 250 + 10*1
+    assert "300.0" in data["suspected_cause"]  # latest power: 250 + 10*5
+    assert "40.0" in data["suspected_cause"]  # power delta
+    assert "+40.0" in data["recommended_action"]
+    assert "L/min" in data["recommended_action"]
+
+
+def test_generate_rca_healthy_scenario_cites_real_numbers_no_action() -> None:
+    """No-anomaly scenario: report still cites real numbers, but recommends no action."""
+    data = _healthy_scenario_data()
+
+    assert "0.0" in data["suspected_cause"]  # temp_delta_c
+    assert "14.0" in data["suspected_cause"]
+    assert "no corrective action required" in data["recommended_action"]
+
+
+def test_generate_rca_three_scenarios_produce_mutually_distinct_reports() -> None:
+    """The flow, power, and healthy scenarios never collide on generic template text."""
+    flow_data = _flow_scenario_data()
+    power_data = _power_scenario_data()
+    healthy_data = _healthy_scenario_data()
+
+    causes = {flow_data["suspected_cause"], power_data["suspected_cause"], healthy_data["suspected_cause"]}
+    actions = {
+        flow_data["recommended_action"],
+        power_data["recommended_action"],
+        healthy_data["recommended_action"],
+    }
+    assert len(causes) == 3
+    assert len(actions) == 3
 
 
 def test_adjust_flow_rate_changes_later_readings_for_targeted_gpu() -> None:
