@@ -87,9 +87,7 @@ def latest_snapshot_per_gpu(
     return latest
 
 
-def rack_health_status(
-    latest: dict[int, TelemetrySnapshot], config: InfernoConfig
-) -> str:
+def rack_health_status(latest: dict[int, TelemetrySnapshot], config: InfernoConfig) -> str:
     """Derive one overall rack-health tier from every GPU's temperature status.
 
     Args:
@@ -135,9 +133,7 @@ def throttled_gpu_ids(latest: dict[int, TelemetrySnapshot]) -> list[int]:
     return sorted(gpu_id for gpu_id, snap in latest.items() if snap.throttled)
 
 
-def compute_pue(
-    latest: dict[int, TelemetrySnapshot], config: InfernoConfig
-) -> float | None:
+def compute_pue(latest: dict[int, TelemetrySnapshot], config: InfernoConfig) -> float | None:
     """Estimate current Power Usage Effectiveness from the latest telemetry.
 
     Models total facility power as IT power plus a coolant-pump power draw

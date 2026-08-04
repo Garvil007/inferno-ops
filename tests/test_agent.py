@@ -42,7 +42,9 @@ def _text_block(text: str) -> SimpleNamespace:
     return SimpleNamespace(type="text", text=text)
 
 
-def _tool_use_block(name: str, tool_input: dict[str, Any], block_id: str = "tool_1") -> SimpleNamespace:
+def _tool_use_block(
+    name: str, tool_input: dict[str, Any], block_id: str = "tool_1"
+) -> SimpleNamespace:
     """Build a fake Anthropic ``tool_use`` content block."""
     return SimpleNamespace(type="tool_use", name=name, input=tool_input, id=block_id)
 
@@ -135,9 +137,7 @@ def test_tool_execution_error_is_reported_as_tool_result_not_a_crash() -> None:
     sim, buffer = _seeded_buffer(config)
 
     responses = [
-        _message(
-            [_tool_use_block("generate_rca", {"gpu_id": 999}, "id1")], "tool_use"
-        ),
+        _message([_tool_use_block("generate_rca", {"gpu_id": 999}, "id1")], "tool_use"),
         _message([_text_block("Could not analyze that GPU.")], "end_turn"),
     ]
     client = _FakeClient(responses)
@@ -355,3 +355,47 @@ def test_grounding_rule_lives_in_one_place_and_both_prompts_use_it() -> None:
     """SYSTEM_PROMPT and CHAT_SYSTEM_PROMPT both interpolate the single shared rule."""
     assert GROUNDING_RULE in SYSTEM_PROMPT
     assert GROUNDING_RULE in CHAT_SYSTEM_PROMPT
+
+
+def test_adjust_flow_rate_is_skipped_when_target_gpu_is_not_throttled() -> None:
+    """Hardening guardrail: a model requesting adjust_flow_rate on a healthy GPU is a no-op."""
+    config = _make_config()
+    sim, buffer = _seeded_buffer(config)
+    assert not buffer[-1].throttled  # sanity: this scenario is healthy
+
+    baseline_flow = sim.step()[0].flow_lpm
+
+    responses = [
+        _message(
+            [_tool_use_block("adjust_flow_rate", {"gpu_id": 0, "delta_lpm": 5.0}, "id1")],
+            "tool_use",
+        ),
+        _message([_text_block("Applied a precautionary flow bump.")], "end_turn"),
+    ]
+    client = _FakeClient(responses)
+
+    decision = run_agent_cycle(client, config, sim, buffer)
+
+    assert decision.action == "No action taken"
+    after_flow = sim.step()[0].flow_lpm
+    assert abs(after_flow - baseline_flow) < 1.0  # only natural drift, no +5.0 jump
+
+
+def test_run_agent_cycle_survives_api_error_without_crashing() -> None:
+    """A client that raises mid-cycle still yields a valid, non-crashing decision."""
+    config = _make_config()
+    sim, buffer = _seeded_buffer(config)
+
+    class _RaisingMessages:
+        def create(self, **_kwargs: object) -> SimpleNamespace:
+            raise anthropic.APIError("boom", request=SimpleNamespace(), body=None)
+
+    class _RaisingClient:
+        def __init__(self) -> None:
+            self.messages = _RaisingMessages()
+
+    decision = run_agent_cycle(_RaisingClient(), config, sim, buffer)
+
+    assert decision.action == "No action taken"
+    assert "did not complete" in decision.explanation
+    assert decision.timestamp

@@ -20,7 +20,8 @@ def _call_tool(name: str, arguments: dict) -> tuple:
 
 
 def test_list_tools_exposes_exactly_the_four_rack_tools() -> None:
-    """The server advertises read_rack_metrics, detect_throttle_event, generate_rca, adjust_flow_rate."""
+    """The server advertises read_rack_metrics, detect_throttle_event, generate_rca, and
+    adjust_flow_rate."""
     tools = _list_tools()
     names = {t.name for t in tools}
 

@@ -18,6 +18,7 @@ import anthropic
 from anthropic.types import Message, MessageParam
 
 from inferno_ops.config import InfernoConfig, load_config
+from inferno_ops.dashboard import latest_snapshot_per_gpu
 from inferno_ops.simulator import RackSimulator
 from inferno_ops.telemetry import TelemetrySnapshot
 from inferno_ops.tools import (
@@ -121,13 +122,52 @@ def _build_tool_dispatch(
     return {
         "read_rack_metrics": lambda _input: read_rack_metrics(buffer),
         "detect_throttle_event": lambda _input: detect_throttle_event(buffer, config),
-        "adjust_flow_rate": lambda tool_input: adjust_flow_rate(
-            sim, tool_input["gpu_id"], tool_input["delta_lpm"]
+        "adjust_flow_rate": lambda tool_input: _guarded_adjust_flow_rate(
+            buffer, sim, tool_input["gpu_id"], tool_input["delta_lpm"]
         ),
-        "generate_rca": lambda tool_input: generate_rca(
-            buffer, tool_input["gpu_id"], config
-        ),
+        "generate_rca": lambda tool_input: generate_rca(buffer, tool_input["gpu_id"], config),
     }
+
+
+def _guarded_adjust_flow_rate(
+    buffer: list[TelemetrySnapshot],
+    sim: RackSimulator,
+    gpu_id: int,
+    delta_lpm: float,
+) -> dict[str, Any]:
+    """Apply a flow adjustment only if the target GPU is currently throttled.
+
+    Hardening for the live-demo steady state: the model is instructed not to
+    act on a healthy rack, but this makes that a code-enforced guarantee
+    instead of a prompt-only hope, so a model that misbehaves can't spam
+    real flow adjustments on a GPU that doesn't need them. Falls open (allows
+    the adjustment) if the GPU has no telemetry yet, since there is nothing
+    to judge against.
+
+    Args:
+        buffer: Flat telemetry history to check the GPU's current state in.
+        sim: Live simulator instance to mutate if the adjustment proceeds.
+        gpu_id: Index of the GPU to adjust.
+        delta_lpm: Change in flow rate, liters per minute.
+
+    Returns:
+        The normal ``adjust_flow_rate`` result if applied, or a
+        ``{"skipped": True, ...}`` dict explaining why it was withheld.
+    """
+    latest = latest_snapshot_per_gpu(buffer)
+    snap = latest.get(gpu_id)
+    if snap is not None and not snap.throttled:
+        logger.info("skipped adjust_flow_rate for GPU %d: not currently throttled", gpu_id)
+        return {
+            "skipped": True,
+            "gpu_id": gpu_id,
+            "reason": (
+                f"GPU {gpu_id} is not currently throttled (latest reading: "
+                f"{snap.temp_c}C, {snap.clock_mhz}MHz) — no action taken to "
+                "avoid unnecessary changes on a healthy rack."
+            ),
+        }
+    return adjust_flow_rate(sim, gpu_id, delta_lpm)
 
 
 def _execute_tool_call(block: Any, dispatch: dict[str, _ToolFn]) -> dict[str, Any]:
@@ -209,16 +249,16 @@ def _run_tool_loop(
                 model=config.model_name,
                 max_tokens=config.agent_max_tokens,
                 system=system,
-                tools=TOOLS,
+                # TOOLS is a plain JSON-schema dict list — matches the API's
+                # actual wire shape, just not the SDK's precise ToolParam union.
+                tools=TOOLS,  # type: ignore[arg-type]
                 messages=messages,
             )
         except anthropic.APIError as exc:
             logger.error("agent API call failed on iteration %d: %s", iteration, exc)
             return None
 
-        logger.info(
-            "agent call iteration=%d stop_reason=%s", iteration, response.stop_reason
-        )
+        logger.info("agent call iteration=%d stop_reason=%s", iteration, response.stop_reason)
         for block in response.content:
             if block.type == "text" and block.text:
                 print(block.text)
@@ -229,10 +269,12 @@ def _run_tool_loop(
         messages.append({"role": "assistant", "content": response.content})
         tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
         tool_results = [_execute_tool_call(b, dispatch) for b in tool_use_blocks]
-        messages.append({"role": "user", "content": tool_results})
+        # tool_results is a list of plain tool_result dicts — matches the
+        # API's actual wire shape, just not the SDK's precise content union.
+        messages.append({"role": "user", "content": tool_results})  # type: ignore[typeddict-item]
 
         if trace is not None:
-            for block, result in zip(tool_use_blocks, tool_results):
+            for block, result in zip(tool_use_blocks, tool_results, strict=True):
                 trace.append(
                     {
                         "name": block.name,
@@ -340,6 +382,9 @@ def _action_summary(trace: list[dict[str, Any]]) -> str:
     """
     for record in trace:
         if record["name"] == "adjust_flow_rate" and not record["is_error"]:
+            result = json.loads(record["result"])
+            if result.get("skipped"):
+                continue  # guardrail withheld the action; not a real change
             gpu_id = record["input"].get("gpu_id")
             delta = record["input"].get("delta_lpm")
             return f"Adjusted GPU {gpu_id} coolant flow by {delta} L/min"
@@ -362,9 +407,7 @@ def _explanation_summary(response: Message | None) -> str:
     return " ".join(text_blocks) if text_blocks else "(agent gave no narrated explanation)"
 
 
-def summarize_decision(
-    response: Message | None, trace: list[dict[str, Any]]
-) -> AgentDecision:
+def summarize_decision(response: Message | None, trace: list[dict[str, Any]]) -> AgentDecision:
     """Reduce one agent cycle's response and tool trace to a loggable decision.
 
     Args:

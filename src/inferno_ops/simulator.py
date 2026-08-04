@@ -122,7 +122,9 @@ class RackSimulator:
         """
         gpu = self._gpus[gpu_id]
         gpu.flow_lpm = _clamp(gpu.flow_lpm + delta_lpm, _FLOW_MIN_LPM, _FLOW_MAX_LPM)
-        logger.info("GPU %d flow adjusted by %.2fL/min, now %.2fL/min", gpu_id, delta_lpm, gpu.flow_lpm)
+        logger.info(
+            "GPU %d flow adjusted by %.2fL/min, now %.2fL/min", gpu_id, delta_lpm, gpu.flow_lpm
+        )
         return self._to_snapshot(gpu)
 
     def _drift(self, gpu: _GpuState) -> None:
@@ -141,9 +143,7 @@ class RackSimulator:
         if not gpu.throttled:
             power_pressure = (gpu.power_w - _POWER_BASE_W) / _POWER_BASE_W
             target_clock = _CLOCK_BASE_MHZ - power_pressure * 300.0
-            clock_delta = _clamp(
-                target_clock - gpu.clock_mhz, -_CLOCK_STEP_MHZ, _CLOCK_STEP_MHZ
-            )
+            clock_delta = _clamp(target_clock - gpu.clock_mhz, -_CLOCK_STEP_MHZ, _CLOCK_STEP_MHZ)
             gpu.clock_mhz = _clamp(gpu.clock_mhz + clock_delta, _CLOCK_MIN_MHZ, _CLOCK_MAX_MHZ)
 
         flow_delta = self._rng.uniform(-_FLOW_STEP_LPM, _FLOW_STEP_LPM)
@@ -164,7 +164,9 @@ class RackSimulator:
             _CLOCK_MIN_MHZ,
             _CLOCK_MAX_MHZ,
         )
-        logger.info("GPU %d throttled at %.1fC, clock now %.0fMHz", gpu.gpu_id, gpu.temp_c, gpu.clock_mhz)
+        logger.info(
+            "GPU %d throttled at %.1fC, clock now %.0fMHz", gpu.gpu_id, gpu.temp_c, gpu.clock_mhz
+        )
 
     def _to_snapshot(self, gpu: _GpuState) -> TelemetrySnapshot:
         """Convert internal mutable state to an immutable public snapshot."""

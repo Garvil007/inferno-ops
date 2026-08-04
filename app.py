@@ -1,9 +1,9 @@
 """InfernoOps Streamlit dashboard entrypoint.
 
-Orchestration only: no business logic here. Day 10 scope — a chat panel that
-answers operator questions using the same tools/buffer as the live-refresh
-fragment, alongside the Day 7-9 rolling telemetry buffer, per-GPU metrics,
-chart, rack health/PUE readout, throttle alert, and agent decision log.
+Orchestration only: no business logic here. Day 13 scope — a manual "inject
+throttle now" demo control, alongside the Day 7-10 rolling telemetry buffer,
+per-GPU metrics, chart, rack health/PUE readout, throttle alert, agent
+decision log, and chat panel.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import time
 from collections import deque
 
 import streamlit as st
+from anthropic.types import MessageParam
 
 from inferno_ops.agent import AgentDecision, answer_chat_question, build_client, run_agent_cycle
 from inferno_ops.config import load_config
@@ -85,7 +86,7 @@ def render_dashboard() -> None:
         )
 
     columns = st.columns(len(latest))
-    for col, gpu_id in zip(columns, sorted(latest)):
+    for col, gpu_id in zip(columns, sorted(latest), strict=True):
         snap = latest[gpu_id]
         status = temp_status(snap.temp_c, config)
         with col:
@@ -119,6 +120,32 @@ def render_dashboard() -> None:
             st.divider()
 
 
+st.subheader("Demo controls")
+inject_col, button_col = st.columns([1, 3])
+with inject_col:
+    inject_gpu_id = st.selectbox("GPU", options=list(range(config.gpu_count)), key="inject_gpu_id")
+with button_col:
+    st.write("")  # vertical alignment with the selectbox label
+    if st.button("\U0001f525 Inject throttle now"):
+        sim = st.session_state.sim
+        buffer = st.session_state.buffer
+        snap = sim.inject_throttle(inject_gpu_id)
+        buffer.append(snap)
+        logger.info("manually injected throttle on GPU %d", inject_gpu_id)
+
+        client = st.session_state.client
+        if client is not None:
+            decision = run_agent_cycle(client, config, sim, list(buffer))
+        else:
+            decision = AgentDecision(
+                timestamp=time.strftime("%H:%M:%S"),
+                detected="N/A",
+                action="N/A",
+                explanation="Agent unavailable: ANTHROPIC_API_KEY missing from environment.",
+            )
+        st.session_state.decision_log.append(decision)
+        st.success(f"Injected throttle on GPU {inject_gpu_id} — see decision log below.")
+
 render_dashboard()
 
 st.subheader("Ask the agent")
@@ -133,7 +160,7 @@ if question:
         st.markdown(question)
 
     if st.session_state.client is not None:
-        prior_messages = [
+        prior_messages: list[MessageParam] = [
             {"role": turn["role"], "content": turn["content"]}
             for turn in list(st.session_state.chat_history)[:-1]
         ]

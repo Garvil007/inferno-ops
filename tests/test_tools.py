@@ -194,9 +194,7 @@ def test_generate_rca_raises_for_unknown_gpu() -> None:
 def _flow_scenario_data() -> dict[str, object]:
     """Build the insufficient-flow RCA scenario and return its data dict."""
     config = _make_config()
-    buffer = [
-        _snap(0, t, 1800.0, temp_c=50.0 + t, flow_lpm=10.0) for t in range(1, 6)
-    ] + [
+    buffer = [_snap(0, t, 1800.0, temp_c=50.0 + t, flow_lpm=10.0) for t in range(1, 6)] + [
         _snap(1, 1, 1800.0, flow_lpm=14.0),
         _snap(2, 1, 1800.0, flow_lpm=14.0),
     ]
@@ -261,7 +259,11 @@ def test_generate_rca_three_scenarios_produce_mutually_distinct_reports() -> Non
     power_data = _power_scenario_data()
     healthy_data = _healthy_scenario_data()
 
-    causes = {flow_data["suspected_cause"], power_data["suspected_cause"], healthy_data["suspected_cause"]}
+    causes = {
+        flow_data["suspected_cause"],
+        power_data["suspected_cause"],
+        healthy_data["suspected_cause"],
+    }
     actions = {
         flow_data["recommended_action"],
         power_data["recommended_action"],
