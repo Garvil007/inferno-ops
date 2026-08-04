@@ -6,7 +6,14 @@ import json
 from types import SimpleNamespace
 from typing import Any
 
-from inferno_ops.agent import run_agent_cycle, run_agent_loop, summarize_decision
+import anthropic
+
+from inferno_ops.agent import (
+    answer_chat_question,
+    run_agent_cycle,
+    run_agent_loop,
+    summarize_decision,
+)
 from inferno_ops.config import InfernoConfig
 from inferno_ops.simulator import RackSimulator
 from inferno_ops.telemetry import TelemetrySnapshot
@@ -47,8 +54,10 @@ class _FakeMessages:
 
     def __init__(self, responses: list[SimpleNamespace]) -> None:
         self._responses = iter(responses)
+        self.calls: list[dict[str, Any]] = []
 
-    def create(self, **_kwargs: object) -> SimpleNamespace:
+    def create(self, **kwargs: object) -> SimpleNamespace:
+        self.calls.append(kwargs)
         return next(self._responses)
 
 
@@ -268,3 +277,72 @@ def test_run_agent_cycle_end_to_end_with_fake_client() -> None:
     assert decision.action == "No action taken"
     assert "nothing to do" in decision.explanation
     assert decision.timestamp
+
+
+def test_answer_chat_question_returns_direct_text_answer() -> None:
+    """A question answered without any tool call returns that text directly."""
+    config = _make_config()
+    sim, buffer = _seeded_buffer(config)
+
+    responses = [
+        _message([_text_block("The rack is currently at 4 GPUs, all healthy.")], "end_turn"),
+    ]
+    client = _FakeClient(responses)
+
+    answer = answer_chat_question(client, config, sim, buffer, "how many GPUs are healthy?")
+
+    assert "4 GPUs, all healthy" in answer
+
+
+def test_answer_chat_question_uses_tools_against_same_buffer() -> None:
+    """A question requiring a tool call (e.g. root cause) still resolves via the real dispatch."""
+    config = _make_config()
+    sim, buffer = _seeded_buffer(config)
+
+    responses = [
+        _message([_tool_use_block("generate_rca", {"gpu_id": 0}, "id1")], "tool_use"),
+        _message([_text_block("GPU 0 throttled due to insufficient coolant flow.")], "end_turn"),
+    ]
+    client = _FakeClient(responses)
+
+    answer = answer_chat_question(client, config, sim, buffer, "why did GPU 0 throttle?")
+
+    assert "insufficient coolant flow" in answer
+
+
+def test_answer_chat_question_includes_prior_turns_in_outgoing_messages() -> None:
+    """Earlier chat turns are replayed to the model so follow-ups stay coherent."""
+    config = _make_config()
+    sim, buffer = _seeded_buffer(config)
+
+    responses = [_message([_text_block("It is now 12.0 L/min.")], "end_turn")]
+    client = _FakeClient(responses)
+    prior = [
+        {"role": "user", "content": "why did GPU 0 throttle?"},
+        {"role": "assistant", "content": "Insufficient coolant flow."},
+    ]
+
+    answer_chat_question(client, config, sim, buffer, "what's its flow rate now?", prior)
+
+    sent_messages = client.messages.calls[-1]["messages"]
+    assert sent_messages[0] == prior[0]
+    assert sent_messages[1] == prior[1]
+    assert sent_messages[2] == {"role": "user", "content": "what's its flow rate now?"}
+
+
+def test_answer_chat_question_handles_failed_cycle_without_crashing() -> None:
+    """An API error mid-chat returns a graceful fallback string, not a crash."""
+    config = _make_config()
+    sim, buffer = _seeded_buffer(config)
+
+    class _RaisingMessages:
+        def create(self, **_kwargs: object) -> SimpleNamespace:
+            raise anthropic.APIError("boom", request=SimpleNamespace(), body=None)
+
+    class _RaisingClient:
+        def __init__(self) -> None:
+            self.messages = _RaisingMessages()
+
+    answer = answer_chat_question(_RaisingClient(), config, sim, buffer, "is everything ok?")
+
+    assert "did not complete" in answer

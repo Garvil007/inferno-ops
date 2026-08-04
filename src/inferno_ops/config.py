@@ -40,6 +40,8 @@ class InfernoConfig:
         pue_fixed_overhead_w: Modeled fixed facility overhead power (lighting,
             networking, etc.), used to estimate PUE from telemetry.
         pue_round_digits: Decimal places to round the computed PUE readout to.
+        dashboard_chat_history_maxlen: Max chat messages (user + assistant
+            combined) kept in the dashboard's chat history.
     """
 
     anthropic_api_key: str | None
@@ -59,6 +61,7 @@ class InfernoConfig:
     pue_pump_power_per_lpm_w: float = 15.0
     pue_fixed_overhead_w: float = 500.0
     pue_round_digits: int = 3
+    dashboard_chat_history_maxlen: int = 40
 
 
 def load_config() -> InfernoConfig:

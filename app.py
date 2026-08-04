@@ -1,8 +1,9 @@
 """InfernoOps Streamlit dashboard entrypoint.
 
-Orchestration only: no business logic here. Day 8 scope — invoke the agent
-every refresh tick and render its decisions in a scrolling event log,
-alongside the Day 7 rolling telemetry buffer, per-GPU metrics, and chart.
+Orchestration only: no business logic here. Day 10 scope — a chat panel that
+answers operator questions using the same tools/buffer as the live-refresh
+fragment, alongside the Day 7-9 rolling telemetry buffer, per-GPU metrics,
+chart, rack health/PUE readout, throttle alert, and agent decision log.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from collections import deque
 
 import streamlit as st
 
-from inferno_ops.agent import AgentDecision, build_client, run_agent_cycle
+from inferno_ops.agent import AgentDecision, answer_chat_question, build_client, run_agent_cycle
 from inferno_ops.config import load_config
 from inferno_ops.dashboard import (
     compute_pue,
@@ -37,6 +38,7 @@ if "sim" not in st.session_state:
     st.session_state.sim = RackSimulator(config=config, seed=config.sim_seed)
     st.session_state.buffer = deque(maxlen=config.dashboard_buffer_maxlen * config.gpu_count)
     st.session_state.decision_log = deque(maxlen=config.dashboard_decision_log_maxlen)
+    st.session_state.chat_history = deque(maxlen=config.dashboard_chat_history_maxlen)
     try:
         st.session_state.client = build_client(config)
     except RuntimeError as exc:
@@ -118,3 +120,34 @@ def render_dashboard() -> None:
 
 
 render_dashboard()
+
+st.subheader("Ask the agent")
+for turn in st.session_state.chat_history:
+    with st.chat_message(turn["role"]):
+        st.markdown(turn["content"])
+
+question = st.chat_input('Ask about the rack (e.g. "why did GPU 3 throttle?")')
+if question:
+    st.session_state.chat_history.append({"role": "user", "content": question})
+    with st.chat_message("user"):
+        st.markdown(question)
+
+    if st.session_state.client is not None:
+        prior_messages = [
+            {"role": turn["role"], "content": turn["content"]}
+            for turn in list(st.session_state.chat_history)[:-1]
+        ]
+        answer = answer_chat_question(
+            st.session_state.client,
+            config,
+            st.session_state.sim,
+            list(st.session_state.buffer),
+            question,
+            prior_messages,
+        )
+    else:
+        answer = "Agent unavailable: ANTHROPIC_API_KEY missing from environment."
+
+    st.session_state.chat_history.append({"role": "assistant", "content": answer})
+    with st.chat_message("assistant"):
+        st.markdown(answer)

@@ -52,6 +52,22 @@ rates) — never a vague description like "high temperature". Do not \
 guess at a cause without checking the RCA record first.
 """
 
+CHAT_SYSTEM_PROMPT = """\
+You are the InfernoOps agent, answering an operator's questions about a \
+rack of GPUs in an immersion-cooled AI data center. You have four tools: \
+read_rack_metrics, detect_throttle_event, generate_rca, and \
+adjust_flow_rate. They read from and act on the same live telemetry and \
+simulator the monitoring dashboard uses — there is no separate data \
+source.
+
+For every question, call whichever tools you need to ground your answer \
+in real numbers (exact temperatures, clock speeds, flow rates, PUE-style \
+figures) before answering. Never guess or make up a number. If a \
+question implies a corrective action (e.g. "fix GPU 3"), you may call \
+adjust_flow_rate, but say plainly what you did and why. Keep answers \
+concise and conversational — a few sentences, not a report.
+"""
+
 _ToolFn = Callable[[dict[str, Any]], Any]
 
 
@@ -134,27 +150,35 @@ def _execute_tool_call(block: Any, dispatch: dict[str, _ToolFn]) -> dict[str, An
         }
 
 
-def run_agent_loop(
+def _run_tool_loop(
     client: anthropic.Anthropic,
     config: InfernoConfig,
     sim: RackSimulator,
     buffer: list[TelemetrySnapshot],
+    system: str,
+    messages: list[MessageParam],
     trace: list[dict[str, Any]] | None = None,
 ) -> Message | None:
-    """Run one full agent cycle: send metrics, execute requested tools, repeat.
+    """Drive the Anthropic tool-use round-trip loop to completion.
 
     Loops on the Anthropic Messages API until the model stops requesting
     tools (``stop_reason != "tool_use"``) or ``config.agent_max_tool_iterations``
     round-trips are exhausted, whichever comes first. Each round-trip may
     contain multiple ``tool_use`` blocks; all their results are returned to
-    the model in a single follow-up message, as the API requires.
+    the model in a single follow-up message, as the API requires. Shared core
+    for both the monitoring cycle (``run_agent_loop``) and chat Q&A
+    (``answer_chat_question``) — both drive the same four tools against the
+    same live buffer/simulator, only ``system`` and the seed ``messages``
+    differ.
 
     Args:
         client: Configured Anthropic client.
         config: Runtime configuration (model name, max tokens, iteration cap).
         sim: Live simulator instance, mutated by action tools like
             ``adjust_flow_rate``.
-        buffer: Flat telemetry history to summarize as the latest snapshot.
+        buffer: Flat telemetry history the tools operate on.
+        system: System prompt for this loop's purpose.
+        messages: Seed message list (mutated in place as the loop proceeds).
         trace: Optional list to append ``{"name", "input", "result"}`` records
             to for every tool call executed this cycle, in order. Left
             untouched (``None``) by default so existing callers are unaffected.
@@ -165,23 +189,13 @@ def run_agent_loop(
         a final answer was produced.
     """
     dispatch = _build_tool_dispatch(buffer, sim, config)
-    snapshot = read_rack_metrics(buffer)
-    messages: list[MessageParam] = [
-        {
-            "role": "user",
-            "content": (
-                "Latest rack telemetry snapshot (one reading per GPU):\n"
-                f"{json.dumps(snapshot, indent=2)}"
-            ),
-        }
-    ]
 
     for iteration in range(1, config.agent_max_tool_iterations + 1):
         try:
             response = client.messages.create(
                 model=config.model_name,
                 max_tokens=config.agent_max_tokens,
-                system=SYSTEM_PROMPT,
+                system=system,
                 tools=TOOLS,
                 messages=messages,
             )
@@ -220,6 +234,42 @@ def run_agent_loop(
         config.agent_max_tool_iterations,
     )
     return None
+
+
+def run_agent_loop(
+    client: anthropic.Anthropic,
+    config: InfernoConfig,
+    sim: RackSimulator,
+    buffer: list[TelemetrySnapshot],
+    trace: list[dict[str, Any]] | None = None,
+) -> Message | None:
+    """Run one full monitoring cycle: send metrics, execute requested tools, repeat.
+
+    Args:
+        client: Configured Anthropic client.
+        config: Runtime configuration (model name, max tokens, iteration cap).
+        sim: Live simulator instance, mutated by action tools like
+            ``adjust_flow_rate``.
+        buffer: Flat telemetry history to summarize as the latest snapshot.
+        trace: Optional list to append tool-call records to. See
+            ``_run_tool_loop``.
+
+    Returns:
+        The final ``Message`` once the model stops requesting tools, or
+        ``None`` if the API call failed or the iteration cap was hit before
+        a final answer was produced.
+    """
+    snapshot = read_rack_metrics(buffer)
+    messages: list[MessageParam] = [
+        {
+            "role": "user",
+            "content": (
+                "Latest rack telemetry snapshot (one reading per GPU):\n"
+                f"{json.dumps(snapshot, indent=2)}"
+            ),
+        }
+    ]
+    return _run_tool_loop(client, config, sim, buffer, SYSTEM_PROMPT, messages, trace)
 
 
 @dataclass(frozen=True)
@@ -342,6 +392,42 @@ def run_agent_cycle(
     trace: list[dict[str, Any]] = []
     response = run_agent_loop(client, config, sim, buffer, trace=trace)
     return summarize_decision(response, trace)
+
+
+def answer_chat_question(
+    client: anthropic.Anthropic,
+    config: InfernoConfig,
+    sim: RackSimulator,
+    buffer: list[TelemetrySnapshot],
+    question: str,
+    prior_messages: list[MessageParam] | None = None,
+) -> str:
+    """Answer an operator's question, grounded in the same tools and buffer.
+
+    Drives the same ``_run_tool_loop`` core as ``run_agent_loop`` — the same
+    four tools against the same live ``buffer``/``sim`` — so chat answers
+    can never diverge from what the monitoring cycle sees.
+
+    Args:
+        client: Configured Anthropic client.
+        config: Runtime configuration.
+        sim: Live simulator instance, mutated by action tools if the model
+            chooses to call one (e.g. in response to "fix GPU 3").
+        buffer: Flat telemetry history the tools operate on.
+        question: The operator's new question.
+        prior_messages: Earlier turns in this chat, already in Anthropic
+            ``{"role", "content"}`` shape, oldest first. ``None``/empty for
+            the first question in a session.
+
+    Returns:
+        The agent's final narrated answer, or a graceful failure statement
+        if the cycle didn't complete (API error or iteration cap) — never
+        raises.
+    """
+    messages: list[MessageParam] = list(prior_messages or [])
+    messages.append({"role": "user", "content": question})
+    response = _run_tool_loop(client, config, sim, buffer, CHAT_SYSTEM_PROMPT, messages)
+    return _explanation_summary(response)
 
 
 def _run_scenario(label: str, config: InfernoConfig, client: anthropic.Anthropic) -> None:
